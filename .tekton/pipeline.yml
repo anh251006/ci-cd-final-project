@@ -1,0 +1,94 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: cd-pipeline
+spec:
+  workspaces:
+    - name: output
+  params:
+    - name: repo-url
+      type: string
+    - name: branch
+      type: string
+      default: main
+    - name: app-name
+      type: string
+    - name: build-image
+      type: string
+  tasks:
+    - name: cleanup
+      taskRef:
+        name: cleanup
+        kind: Task
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: clone
+      taskRef:
+        name: git-clone
+        kind: Task
+      runAfter:
+        - cleanup
+      workspaces:
+        - name: output
+          workspace: output
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.branch)
+
+    - name: lint
+      taskRef:
+        name: flake8
+        kind: Task
+      runAfter:
+        - clone
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: args
+          value: ["--count", "--max-complexity=10", "--max-line-length=127", "--statistics"]
+
+    - name: tests
+      taskRef:
+        name: nose
+        kind: Task
+      runAfter:
+        - lint
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: args
+          value: "-v --with-spec --spec-color"
+
+    - name: build
+      taskRef:
+        name: openshift-client
+        kind: Task
+      runAfter:
+        - tests
+      workspaces:
+        - name: manifest-dir
+          workspace: output
+      params:
+        - name: SCRIPT
+          value: |
+            oc start-build my-app --from-dir=$(workspaces.manifest-dir.path) --follow --wait
+
+    - name: deploy
+      taskRef:
+        name: openshift-client
+        kind: Task
+      runAfter:
+        - build
+      params:
+        - name: SCRIPT
+          value: |
+            oc create deployment $(params.app-name) \
+              --image=$(params.build-image) \
+              --dry-run=client -o yaml | oc apply -f -
